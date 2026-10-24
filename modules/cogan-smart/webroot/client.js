@@ -21,8 +21,8 @@
   // Last answers, kept so a tab shows its last values at once while it reads fresh ones:
   // each tab is its own page, so without this every switch starts empty.
   const store = {
-    get(key) { try { return JSON.parse(localStorage.getItem('cogan.cache.v290.' + CoganI18n.language() + '.' + key)); } catch (_) { return null; } },
-    set(key, value) { try { localStorage.setItem('cogan.cache.v290.' + CoganI18n.language() + '.' + key, JSON.stringify(value)); } catch (_) { /* storage off or full */ } }
+    get(key) { try { return JSON.parse(localStorage.getItem('cogan.cache.v291.' + CoganI18n.language() + '.' + key)); } catch (_) { return null; } },
+    set(key, value) { try { localStorage.setItem('cogan.cache.v291.' + CoganI18n.language() + '.' + key, JSON.stringify(value)); } catch (_) { /* storage off or full */ } }
   };
 
   function create(script) {
@@ -94,7 +94,7 @@
     function report(value, {background = false} = {}) {
       const args = String(value).trim().split(/\s+/), key = args.join(' ');
       if (args.some(arg => !/^[A-Za-z0-9_.-]+$/.test(arg))) return Promise.reject(new Error('Argumen tidak valid'));
-      const read = /^(status|live|now|summary|events|cooling|scan)$/.test(args[0]);
+      const read = /^(status|live|now|summary|events|cooling|scan|pkgs)$/.test(args[0]);
       if (read && reads.has(key)) return reads.get(key);
       if (!read) revision++;
       let resolve, reject;
@@ -212,5 +212,24 @@
     const m = health(monitor);
     return T(!m.running ? '■ berhenti' : m.stalled ? '⚠ data terlambat' : m.fresh ? '● mencatat' : '◌ menyiapkan sampel');
   }
-  window.CoganUI = {create, poll, action, text, html, shortKernel, kernel, cooling, folds, identity, health, recorder};
+  // App names for the package names in the temperature log (owner 2026-10-24: a spoofed root manager
+  // showed as weonse.bxmfmy.qeomje). KernelSU Next and BakaSU both offer ksu.getPackagesInfo. The names go
+  // to the module hex-encoded, because report() takes plain tokens only. At most every 6 hours, or every
+  // 10 minutes while the manager has not loaded its app list; without the API the package names stay.
+  let labelApi;
+  async function learnLabels() {
+    if (typeof ksu === 'undefined' || typeof ksu.getPackagesInfo !== 'function') return;
+    try { if (Date.now() < Number(localStorage.getItem('cogan.labels.next') || 0)) return; } catch (_) { /* storage off */ }
+    labelApi = labelApi || create('/data/adb/modules/cogan_smart/thermal/report.sh');
+    const pkgs = await labelApi.report('pkgs', {background: true});
+    const info = pkgs.length ? JSON.parse(ksu.getPackagesInfo(JSON.stringify(pkgs))) : [];
+    const hex = value => Array.from(new TextEncoder().encode(value), b => b.toString(16).padStart(2, '0')).join('');
+    const pairs = info.filter(p => p && !p.error && typeof p.appLabel === 'string' && /^[A-Za-z0-9_.]+$/.test(p.packageName || '')
+                                  && p.appLabel.trim() && p.appLabel.trim() !== p.packageName)
+      .map(p => [p.packageName, hex(p.appLabel.trim())]).filter(([, h]) => h.length <= 120);
+    for (let i = 0; i < pairs.length; i += 15) await labelApi.report(['labels', ...pairs.slice(i, i + 15).flat()].join(' '), {background: true});
+    const wait = !pkgs.length || pairs.length ? 6 * 3600e3 : 600e3;
+    try { localStorage.setItem('cogan.labels.next', String(Date.now() + wait)); } catch (_) { /* storage off */ }
+  }
+  window.CoganUI = {create, poll, action, text, html, shortKernel, kernel, cooling, folds, identity, health, recorder, learnLabels};
 })();

@@ -2,10 +2,11 @@
 # Cogan Smart · Thermal: background sampler. Every INTERVAL seconds it appends one line to
 # $CT_DATA/data/<date>.tsv with every temperature and what the phone was doing at that moment:
 #
-#   ts  app  screen  charging  current_mA  battery_t10  cpu_x10  kernel_x10  gpu  top  net  freqs  zones
+#   ts  app  screen  charging  current_mA  battery_t10  cpu_x10  kernel_x10  gpu  top  net  freqs  zones  cap
 #
 # top = "name:pct_x10;..." (busiest user processes), net = "wifi:kB/s,cell:kB/s",
-# zones = "type=tenths_of_degC,...". Usage: sampler.sh [--once]
+# zones = "type=tenths_of_degC,...", cap = CPU cap of Cogan Smart · Power "big%/little%/step" or "-"
+# (since v2.9.1). Usage: sampler.sh [--once]
 
 MODDIR=${0%/*}; [ "$MODDIR" = "$0" ] && MODDIR=.   # started as "sh report.sh"
 . "$MODDIR/common.sh"
@@ -49,24 +50,41 @@ sample() {
   gpu=$(read_gpu)
   freqs=$(read_freqs)
   zones=$(read_zones)
+  power_cap
 
   day=$(date +%Y-%m-%d)
-  printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' "$now" "$app" "$screen" "$charging" "$current" \
-    "$battery" "$cpu" "$kernel" "$gpu" "${top:--}" "$net" "$freqs" "${zones:--}" > "$CT_RUN/sample.tsv"
+  printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' "$now" "$app" "$screen" "$charging" "$current" \
+    "$battery" "$cpu" "$kernel" "$gpu" "${top:--}" "$net" "$freqs" "${zones:--}" "$cap" > "$CT_RUN/sample.tsv"
   cat "$CT_RUN/sample.tsv" >> "$CT_DATA/data/$day.tsv"
   echo "$now" > "$CT_RUN/last"
 
   # Short report of this sample for other modules (Cogan Smart · Power reads it):
   # ts  main_temp  battery_temp  charging  app_label  cause (from the last few samples, see report.awk)
-  tail -n 9 "$CT_DATA/data/$day.tsv" > "$CT_RUN/recent.tsv"
-  awk -v mode=latest -v since=0 -v now=$((now + 1)) -v HOT=$((HOT_TEMP * 10)) \
-      -f "$MODDIR/thermal.awk" -f "$MODDIR/report.awk" "$CT_RUN/recent.tsv" > "$CT_RUN/latest.tmp" 2>/dev/null
+  # The last 40 samples also show a sensor stuck at one value (written to run/stuck for live reads).
+  tail -n 40 "$CT_DATA/data/$day.tsv" > "$CT_RUN/recent.tsv"
+  awk -v mode=latest -v since=0 -v now=$((now + 1)) -v HOT=$((HOT_TEMP * 10)) -v LABELS="$CT_DATA/labels.tsv" \
+      -v STUCKFILE="$CT_RUN/stuck" -f "$MODDIR/thermal.awk" -f "$MODDIR/report.awk" "$CT_RUN/recent.tsv" > "$CT_RUN/latest.tmp" 2>/dev/null
   [ -s "$CT_RUN/latest.tmp" ] && mv "$CT_RUN/latest.tmp" "$CT_RUN/latest"
   IFS='	' read -r _ main _ _ label _ < "$CT_RUN/latest" 2>/dev/null
   [ "$NOTIFY" = 1 ] || return 0
   body=$(body_temp "$zones")
   case "$body" in ''|*[!0-9-]*|-9999) body=$battery ;; esac   # no phone body sensor: the battery
   alert "$now" "$label" "$cpu" "$gpu" "$body"
+}
+
+# cap = the CPU cap Cogan Smart · Power applies right now as "big%/little%/step" (step 0: no heat step),
+# or "-" when its controller wrote no state in the last minute. Shell builtins only, no extra process.
+power_cap() {
+  cap=-; pc_state=""
+  IFS= read -r pc_state < "$CP_DATA/run/state.json" 2>/dev/null || :
+  pc_ts=${pc_state#*\"ts\":}; pc_ts=${pc_ts%%[!0-9]*}
+  case "$pc_ts" in ''|*[!0-9]*) return 0 ;; esac
+  [ $((now - pc_ts)) -le 60 ] && [ $((pc_ts - now)) -le 5 ] || return 0
+  pc_big=${pc_state#*\"big\":}; pc_big=${pc_big%%[!0-9]*}
+  pc_little=${pc_state#*\"little\":}; pc_little=${pc_little%%[!0-9]*}
+  pc_level=${pc_state#*\"level\":}; pc_level=${pc_level%%[!0-9]*}   # the first "level" is the step
+  [ -n "$pc_big" ] && [ -n "$pc_little" ] && [ -n "$pc_level" ] && cap="$pc_big/$pc_little/$pc_level"
+  return 0
 }
 
 # Optional heat notification (NOTIFY=1), on the phone body, at most once every 10 minutes.

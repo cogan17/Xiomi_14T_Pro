@@ -1,4 +1,61 @@
-# Cogan Smart Kernel v2.9.0
+# Cogan Smart Kernel v2.9.1
+
+## Satu angka Badan HP, nama aplikasi, batas CPU di log, sensor macet / One phone body number, app names, CPU cap in the log, stuck sensors — v2.9.1
+
+Indonesia:
+
+- Satu angka Badan HP di semua tempat: suhu badan milik HyperOS sendiri (`hyperos_board`, dari
+  `board_sensor_temp`) bila ada, lalu sensor kulit terpanas, lalu baterai. Tab Daya, tab Suhu,
+  kartu Rem HyperOS, log dan pengendali memakai angka yang sama. Owner: "suhu masih inkonsistensi".
+  Dari CSV 6 jam owner (1.257 sampel): angka HyperOS rata-rata 0,1 °C di bawah `quiet_therm` dan
+  90% waktu dalam −0,7…+0,3 °C, jadi ambang 39/41/44 °C tetap.
+- Naik-turun: dari data yang sama, perubahan antar-sampel kecil (90% di bawah 0,3 °C); lompatan
+  besar terjadi saat prosesor bekerja keras (baterai ikut naik) atau saat HP tidur/reboot, ketika
+  log berhenti 3–5 menit. Grafik kini terputus pada jeda itu, bukan menarik garis curam, dan
+  memakai rata-rata tiap potongan waktu, bukan puncaknya; suhu tertinggi tetap di kotak Tertinggi.
+- Nama aplikasi asli di tab Suhu, ringkasan dan log yang disimpan. Nama diambil dari root manager
+  (KernelSU Next dan BakaSU sama-sama menyediakan `getPackagesInfo`), paling sering tiap 6 jam,
+  untuk nama paket yang belum dikenal. Contoh dari log owner: `weonse.bxmfmy.qeomje` (manager
+  spoofed, nama paketnya sengaja acak) menjadi nama manager-nya, `com.anthropic.claude` menjadi
+  Claude. Nama disimpan di `labels.tsv`; nama dengan karakter kontrol atau lebih dari 60 byte
+  dibuang. Tanpa API itu, nama paket tetap tampil seperti sebelumnya.
+- Batas CPU di log: tiap sampel mencatat batas CPU dari pengendali Daya (CPU besar/kecil dan
+  langkah panas). Ringkasan menulis berapa persen waktu CPU diturunkan karena panas dan batas
+  terendahnya, juga waktu batas mode Hemat. Baris detail dan CSV (kolom `batas_cpu`) ikut
+  menampilkannya. Data lama tanpa kolom ini tetap terbaca.
+- Sensor macet tidak dihitung: sensor yang nilainya sama persis selama 30 sampel (±10 menit)
+  sementara prosesor bergerak 5 °C atau lebih (log owner: `mtk-master-charger` tetap 50,0 °C
+  selama satu jam setelah mengecas) tidak dihitung di tabel per bagian dan kotak suhu langsung,
+  dan namanya disebut di ringkasan. Sensor Badan HP dan baterai tidak pernah dibuang.
+- CSV: nama aplikasi dan proses teratas diberi tanda kutip, karena nama aplikasi bisa memuat koma.
+
+English:
+
+- One phone body number everywhere: HyperOS's own body temperature (`hyperos_board`, from
+  `board_sensor_temp`) when there, else the hottest skin sensor, else the battery. The Power tab,
+  the Temperature tab, the HyperOS brakes card, the log and the controller use the same number.
+  Owner: "the temperature is still inconsistent". In the owner's 6-hour CSV (1,257 samples) the
+  HyperOS number is 0.1 °C below `quiet_therm` on average and within −0.7…+0.3 °C 90% of the time,
+  so the 39/41/44 °C thresholds stay.
+- Ups and downs: in the same data, sample-to-sample changes are small (90% under 0.3 °C); big jumps
+  come with a hard-working processor (the battery rises too) or across sleep and restarts, when the
+  log pauses for 3–5 minutes. The chart now breaks at such gaps instead of drawing a steep line, and
+  plots the average of each slice instead of its peak; the highest reading stays in the Peak tile.
+- Real app names in the Temperature tab, summaries and saved logs. Names come from the root manager
+  (KernelSU Next and BakaSU both offer `getPackagesInfo`), at most every 6 hours, for package names
+  not known yet. From the owner's log: `weonse.bxmfmy.qeomje` (a spoofed manager, its package name is
+  random on purpose) becomes the manager's name, `com.anthropic.claude` becomes Claude. Names are kept
+  in `labels.tsv`; names with control characters or over 60 bytes are dropped. Without that API the
+  package names show as before.
+- CPU cap in the log: every sample records the CPU cap of the Power controller (big/little CPU and the
+  heat step). The summary shows how much of the time the CPU was lowered for heat and the lowest cap,
+  plus the time under the Power saver cap. Detail lines and the CSV (column `batas_cpu`) show it too.
+  Older data without this column still reads.
+- Stuck sensors are left out: a sensor that keeps one exact value for 30 samples (about 10 minutes)
+  while the processor moves 5 °C or more (owner's log: `mtk-master-charger` stayed at 50.0 °C for an
+  hour after charging) no longer counts in the component table and the live tiles, and the summary
+  names it. Phone body and battery sensors are never left out.
+- CSV: the app name and top processes are quoted, since an app name can hold a comma.
 
 ## Mode mengikuti Badan HP / Modes follow the phone body — v2.9.0
 

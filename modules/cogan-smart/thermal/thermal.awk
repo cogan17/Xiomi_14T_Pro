@@ -23,8 +23,9 @@ function group_name(g) {
            g == "wifi" ? "Wi-Fi" : tr("Lainnya", "Other")
 }
 
-# Friendly names for common packages; anything else keeps its package name.
-function label(pkg) {
+# Friendly names for common packages, then the app names the root manager reported for this phone
+# (LABELS, see report.sh labels); anything else keeps its package name.
+function label(pkg,   l) {
     if (pkg == "" || pkg == "-") return tr("Tidak diketahui", "Unknown")
     if (pkg == "screen_off") return tr("Layar mati", "Screen off")
     if (pkg == "com.instagram.android") return "Instagram"
@@ -55,7 +56,15 @@ function label(pkg) {
     if (pkg == "system_server") return tr("Sistem Android", "Android system")
     if (pkg == "surfaceflinger") return tr("SurfaceFlinger (tampilan)", "SurfaceFlinger (display)")
     if (pkg == "com.termux") return "Termux"
-    return pkg
+    l = learned(pkg)
+    return l != "" ? l : pkg
+}
+function learned(pkg,   line, kv) {
+    if (!LBL_READ) {
+        LBL_READ = 1
+        if (LABELS != "") { while ((getline line < LABELS) > 0) if (split(line, kv, "\t") == 2) LBL[kv[1]] = kv[2]; close(LABELS) }
+    }
+    return (pkg in LBL) ? LBL[pkg] : ""
 }
 
 # The power part's modes, as written to modes.tsv.
@@ -96,13 +105,16 @@ function main_temp(zones,   n, z, i, kv, g, best, any) {
     return best > -9999 ? best : any
 }
 
-# Hottest phone-body (skin) zone of a zone list, or -9999 when the phone has none. Owner 2026-10-24:
-# "hot" and the power modes follow what a hand feels, not the processor (about 50 °C at rest).
+# The phone body (Badan HP) of a zone list, or -9999 when the phone has no body sensor. Owner 2026-10-24:
+# "hot" and the power modes follow what a hand feels, not the processor (about 50 °C at rest). HyperOS's
+# own body temperature (hyperos_board) when it is there, so every card and HyperOS show one number
+# (owner's 6-hour log: within -0.7..+0.3 °C of quiet_therm 90% of the time); else the hottest skin zone.
 function body_temp(zones,   n, z, i, kv, best) {
     best = -9999
     n = split(zones, z, ",")
     for (i = 1; i <= n; i++) {
         if (split(z[i], kv, "=") != 2) continue
+        if (kv[1] == "hyperos_board") return kv[2] + 0
         if (group(kv[1]) == "skin" && kv[2] + 0 > best) best = kv[2] + 0
     }
     return best

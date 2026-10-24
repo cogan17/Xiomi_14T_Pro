@@ -440,9 +440,11 @@ class PowerModeTests(unittest.TestCase):
         # The board temperature joins the phone body group: the controller reads it like a skin sensor.
         self.assertEqual((status["body"], status["body_from"]), (406, "skin"))
         self.phone.set_temp(65.0)
-        self.phone.set_body(39.0)                                         # the hottest body sensor counts
+        self.phone.set_body(39.0)
         state = self.phone.step()
         self.assertEqual((state["body"], state["level"]), (406, 1))       # within 1 °C of 41: a gentle step
+        self.phone.set_body(41.5)                                         # HyperOS's number wins (v2.9.1)
+        self.assertEqual(self.phone.step()["body"], 406)
         self.assertEqual({path: path.read_text() for path in message.iterdir()}, before)
 
     def test_start_and_stop_put_everything_back(self):

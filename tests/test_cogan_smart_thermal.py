@@ -74,7 +74,8 @@ class FakePhone:
             (self.bin / name).chmod(0o755)
         os.symlink(SHELL, self.bin / "sh")
         os.symlink(AWK, self.bin / "awk")
-        self.env = dict(os.environ, PATH=f"{self.bin}:{os.environ['PATH']}", TZ="WIB-7",
+        self.power = base / "power"   # Cogan Smart · Power's data (its controller state)
+        self.env = dict(os.environ, PATH=f"{self.bin}:{os.environ['PATH']}", TZ="WIB-7", CP_DATA=str(self.power),
                         CT_DATA=str(self.data), CT_SYS=str(self.sys), CT_PROC=str(self.proc), CT_OUT=str(self.out))
 
     def set_net(self, wifi, cell):
@@ -105,10 +106,10 @@ class FakePhone:
         return self.run("report.sh", *args)
 
 
-def sample(ts, app, zones, charging=0, current=300, cpu=150, kernel=20, gpu=10, top="-", net="wifi:5,cell:0"):
+def sample(ts, app, zones, charging=0, current=300, cpu=150, kernel=20, gpu=10, top="-", net="wifi:5,cell:0", cap=None):
     zone_text = ",".join(f"{name}={value}" for name, value in zones.items())
-    return "\t".join(map(str, (ts, app, 0 if app == "screen_off" else 1, charging, current, 350, cpu, kernel, gpu,
-                               top, net, "p0:1800", zone_text))) + "\n"
+    fields = (ts, app, 0 if app == "screen_off" else 1, charging, current, 350, cpu, kernel, gpu, top, net, "p0:1800", zone_text)
+    return "\t".join(map(str, fields + ((cap,) if cap else ()))) + "\n"
 
 
 class SamplerTests(unittest.TestCase):
@@ -132,8 +133,9 @@ class SamplerTests(unittest.TestCase):
         net_prev.write_text(f"{int(time.time()) - 20} 0 0\n")
         self.phone.run("sampler.sh", "--once")
         first, second = self.lines()
-        self.assertEqual(len(second), 13)
-        ts, app, screen, charging, current, battery, cpu, kernel, gpu, top, net, freqs, zones = second
+        self.assertEqual(len(second), 14)
+        ts, app, screen, charging, current, battery, cpu, kernel, gpu, top, net, freqs, zones, cap = second
+        self.assertEqual(cap, "-")                            # Cogan Smart · Power is not running here
         self.assertEqual(first[6:8], ["-1", "-1"])           # no previous CPU reading yet
         self.assertEqual((app, screen, charging, current, battery, gpu), ("com.mobile.legends", "1", "1", "2100", "361", "65"))
         self.assertEqual(cpu, "400")                          # 400 of 1000 ticks busy = 40.0 %
@@ -160,6 +162,17 @@ class SamplerTests(unittest.TestCase):
         board = [zone for zone in now["zones"] if zone["name"] == "hyperos_board"]
         self.assertEqual((board[0]["t"], board[0]["id"]), (406, "skin"))
         self.assertEqual((now["body"], now["body_from"]), (406, "skin"))
+
+    def test_sample_records_the_power_cap(self):
+        # v2.9.1 (owner 2026-10-24): every sample shows the CPU cap of Cogan Smart · Power, "-" when it is off.
+        self.phone.run("sampler.sh", "--once")
+        state = '{"ts":%d,"mode":"seimbang","main":650,"body":415,"limit":41,"brake":0,"busy":1,"level":2,"big":80,' \
+                '"little":100,"battery":{"level":50,"status":"discharging","temp":380,"current":-900},"charge_off":""}\n'
+        write(self.phone.power / "run/state.json", state % int(time.time()))
+        self.phone.run("sampler.sh", "--once")
+        write(self.phone.power / "run/state.json", state % (int(time.time()) - 300))   # stopped 5 minutes ago
+        self.phone.run("sampler.sh", "--once")
+        self.assertEqual([line[13] for line in self.lines()], ["-", "80/100/2", "-"])
 
     def test_latest_report_for_other_modules(self):
         self.phone.run("sampler.sh", "--once")
@@ -311,6 +324,95 @@ class ReportTests(unittest.TestCase):
         self.phone.report("clear")
         self.assertEqual((self.phone.data / "modes.tsv").read_text().split("\t")[1], "seimbang\n")
 
+    def test_summary_shows_how_much_the_cpu_was_lowered(self):
+        now = int(time.time())
+        zones = {"soc_max": 600, "battery": 380, "shell_back": 405}
+        caps = ["100/100/0"] * 10 + ["80/100/2"] * 4 + ["70/100/3"] + ["60/80/0"] * 5
+        lines = [sample(now - 600 + i * 20, "com.android.chrome", zones, cap=cap) for i, cap in enumerate(caps)]
+        lines += [sample(now - 100 + i * 20, "com.android.chrome", zones) for i in range(3)]   # older module: no cap
+        for old in (self.phone.data / "data").glob("*.tsv"):
+            old.unlink()
+        write(self.phone.data / "data" / time.strftime("%Y-%m-%d.tsv", time.gmtime(now + 7 * 3600)), "".join(lines))
+        summary = json.loads(self.phone.report("summary", "3600"))
+        self.assertEqual(summary["cap"], {"samples": 20, "heat_pct": 25, "mode_pct": 25, "min_big": 70, "min_little": 100})
+        self.assertIn("CPU diturunkan karena panas: 25% waktu (terendah CPU besar 70%, kecil 100%) · batas mode Hemat 25% waktu",
+                      summary["text"])
+        detail = self.phone.report("detail", "3600")
+        self.assertEqual(detail.count("| batas CPU "), 10)
+        self.assertIn("| batas CPU 80/100% |", detail)
+        table = list(csv.DictReader(self.phone.report("csv", "3600").splitlines()))
+        self.assertEqual([row["batas_cpu"] for row in table].count("80/100"), 4)
+        self.assertEqual(table[-1]["batas_cpu"], "")
+
+    def test_a_stuck_sensor_is_left_out(self):
+        # Owner's log 2026-10-24: the charger IC read 50.0 °C for an hour while the processor went up and down.
+        now = int(time.time())
+        lines = [sample(now - 1200 + i * 20, "com.android.chrome",
+                        {"soc_max": 450 + (i % 6) * 60, "battery": 370, "shell_back": 390, "charger1_therm": 420 + i % 3,
+                         "mtk-master-charger": 500}) for i in range(50)]
+        for old in (self.phone.data / "data").glob("*.tsv"):
+            old.unlink()
+        write(self.phone.data / "data" / time.strftime("%Y-%m-%d.tsv", time.gmtime(now + 7 * 3600)), "".join(lines))
+        summary = json.loads(self.phone.report("summary", "3600"))
+        self.assertEqual(summary["stuck"], "mtk-master-charger")    # battery and shell_back stay: never left out
+        charger = {group["id"]: group for group in summary["groups"]}["chg"]
+        self.assertEqual(charger["peak"], 500)            # counted until it proved stuck (30 samples)
+        self.assertLess(charger["avg"], 470)
+        self.assertIn("Sensor macet, tidak dihitung: mtk-master-charger", summary["text"])
+        # A sensor that only stays still while the phone rests is not stuck.
+        calm = [sample(now - 1200 + i * 20, "screen_off", {"soc_max": 450, "battery": 300}) for i in range(50)]
+        write(self.phone.data / "data" / time.strftime("%Y-%m-%d.tsv", time.gmtime(now + 7 * 3600)), "".join(calm))
+        self.assertEqual(json.loads(self.phone.report("summary", "3600"))["stuck"], "")
+
+    def test_the_phone_body_is_hyperos_own_number(self):
+        # Owner 2026-10-24, "suhu masih inkonsistensi": one Badan HP everywhere, the number HyperOS uses.
+        now = int(time.time())
+        lines = [sample(now - 600 + i * 20, "com.android.chrome", {"soc_max": 550, "battery": 380, "shell_back": 418,
+                                                                     "hyperos_board": 406}) for i in range(10)]
+        for old in (self.phone.data / "data").glob("*.tsv"):
+            old.unlink()
+        write(self.phone.data / "data" / time.strftime("%Y-%m-%d.tsv", time.gmtime(now + 7 * 3600)), "".join(lines))
+        summary = json.loads(self.phone.report("summary", "3600"))
+        body = {group["id"]: group for group in summary["groups"]}["skin"]
+        self.assertEqual((body["avg"], body["peak"], summary["hot_pct"]), (406, 406, 0))   # 41.8 elsewhere would be hot
+        write(self.phone.sys / "class/thermal/thermal_message/board_sensor_temp", "37400\n")
+        live = json.loads(self.phone.report("now"))
+        self.assertEqual((live["body"], {g["id"]: g["t"] for g in live["groups"]}["skin"]), (374, 374))   # shell_back is 39.0
+
+    def test_live_tiles_skip_a_stuck_sensor(self):
+        write(self.phone.sys / "class/thermal/thermal_zone20/type", "mtk-master-charger\n")
+        write(self.phone.sys / "class/thermal/thermal_zone20/temp", "50000\n")
+        write(self.phone.data / "run/stuck", "mtk-master-charger\n")
+        now = json.loads(self.phone.report("now"))
+        self.assertNotIn("chg", [group["id"] for group in now["groups"]])
+        zone = [zone for zone in now["zones"] if zone["name"] == "mtk-master-charger"][0]
+        self.assertEqual((zone["t"], zone["stuck"]), (500, 1))
+
+    def test_app_names_from_the_root_manager(self):
+        # A spoofed manager has a random package name (owner 2026-10-24: weonse.bxmfmy.qeomje).
+        now = int(time.time())
+        lines = [sample(now - 600 + i * 20, "weonse.bxmfmy.qeomje", {"soc_max": 500, "battery": 380, "shell_back": 415},
+                        top="com.anthropic.claude:150;com.mobile.legends:20") for i in range(10)]
+        for old in (self.phone.data / "data").glob("*.tsv"):
+            old.unlink()
+        write(self.phone.data / "data" / time.strftime("%Y-%m-%d.tsv", time.gmtime(now + 7 * 3600)), "".join(lines))
+        self.assertEqual(sorted(json.loads(self.phone.report("pkgs"))), ["com.anthropic.claude", "weonse.bxmfmy.qeomje"])
+        hexed = lambda text: text.encode().hex()
+        answer = json.loads(self.phone.report("labels", "weonse.bxmfmy.qeomje", hexed("KernelSU Next"),
+                                              "com.anthropic.claude", hexed("Claude, \"AI\" ✨"),
+                                              "bad..name", hexed("Nope"), "com.example.ctrl", hexed("Line\nBreak"),
+                                              "com.example.long", hexed("x" * 61)))
+        self.assertEqual(answer, {"ok": 1, "labels": 2})
+        self.assertEqual(self.phone.report("pkgs").strip(), "[]")
+        summary = json.loads(self.phone.report("summary", "3600"))
+        self.assertEqual(summary["apps"][0]["name"], "KernelSU Next")
+        self.assertIn("Latar belakang: Claude, \"AI\" ✨", [cause["name"] for cause in summary["causes"]])
+        table = list(csv.DictReader(self.phone.report("csv", "3600").splitlines()))
+        self.assertEqual((table[0]["aplikasi"], table[0]["proses_teratas"]), ("KernelSU Next", 'Claude, "AI" ✨ 15.0%; Mobile Legends 2.0%'))
+        # A newer name replaces the old one; other names stay.
+        self.phone.report("labels", "weonse.bxmfmy.qeomje", hexed("BakaSU"))
+        self.assertEqual(json.loads(self.phone.report("summary", "3600"))["apps"][0]["name"], "BakaSU")
+
     def test_short_range_only_sees_recent_samples(self):
         summary = json.loads(self.phone.report("summary", "300"))
         self.assertLessEqual(summary["samples"], 16)
@@ -324,7 +426,7 @@ class ReportTests(unittest.TestCase):
         rows = self.phone.report("csv", "86400").splitlines()
         self.assertEqual(len(rows), 141)
         self.assertTrue(rows[0].startswith("waktu,aplikasi,layar,cas"))
-        self.assertIn(",Mobile Legends,nyala,tidak,", rows[1])
+        self.assertIn(',"Mobile Legends",nyala,tidak,', rows[1])
         table = list(csv.reader(rows))
         self.assertEqual({len(row) for row in table}, {len(table[0])})
         first = dict(zip(table[0], table[1]))
@@ -333,7 +435,7 @@ class ReportTests(unittest.TestCase):
         self.assertEqual(now["main"], 550)                     # read from the sensors just now
         self.assertEqual((now["app"], now["charging"], now["release"]), ("Layar utama (launcher)", 1, "6.1.177-Cogan-r3"))
         self.assertEqual(now["running"], 0)
-        self.assertIn({"name": "soc_max", "group": "Prosesor", "id": "cpu", "t": 550}, now["zones"])
+        self.assertIn({"name": "soc_max", "group": "Prosesor", "id": "cpu", "t": 550, "stuck": 0}, now["zones"])
         self.assertEqual((now["body"], now["body_from"]), (390, "skin"))   # the warmer of shell_back and board_ntc
         self.assertIn({"name": "Badan HP", "id": "skin", "t": 390}, now["groups"])
 

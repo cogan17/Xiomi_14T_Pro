@@ -7,6 +7,8 @@
 #   report.sh csv SECS            one CSV row per sample (text)
 #   report.sh save SECS           write the summary (txt) and samples (csv) to $CT_OUT
 #   report.sh status              sampler state and settings
+#   report.sh pkgs                package names of the last day that have no app name yet (JSON list)
+#   report.sh labels PKG HEX ...  app names from the root manager, UTF-8 hex-encoded (the WebUI asks)
 #   report.sh set KEY VALUE ...   change settings (only known keys, plain numbers within range)
 #   report.sh start | stop        start or stop the sampler
 #   report.sh clear               delete the recorded history
@@ -36,7 +38,7 @@ run_awk() {   # run_awk MODE SECS FILES...
   mode=$1; secs=$2; shift 2
   awk -v mode="$mode" -v since=$((now - secs)) -v now="$now" -v secs="$secs" -v HOT=$((HOT_TEMP * 10)) \
       -v TZOFF="$tzoff" -v KFILE="$kfile" -v MFILE="$mfile" -v fresh="$fresh" -v release="$release" -v running="$running" \
-      -v sensor_ts="${SS_TS:-0}" -v health="${cs_health:-null}" -v LANG="$CS_LANG" \
+      -v sensor_ts="${SS_TS:-0}" -v health="${cs_health:-null}" -v LANG="$CS_LANG" -v LABELS="$CT_DATA/labels.tsv" -v SKIP="$skip" \
       -f "$MODDIR/thermal.awk" -f "$MODDIR/report.awk" "$kfile" "$mfile" "$@"
 }
 
@@ -168,7 +170,29 @@ save_log() {
   printf '{"ok":1,"samples":%d,"dir":"%s","txt":"%s","csv":"%s"}\n' "$rows" "$dir" "$dir/$name.txt" "$dir/$name.csv"
 }
 
-case "$1" in now|summary|text|csv|detail|status|cooling) ;; *)
+# App names the root manager knows (owner 2026-10-24: a spoofed manager showed as weonse.bxmfmy.qeomje).
+# The WebUI sends PKG HEX pairs, HEX being the UTF-8 name, because its commands take plain tokens only.
+# Names with control characters or over 60 bytes are dropped; the newest name of a package wins.
+learn_labels() {
+  mkdir -p "$CT_DATA"
+  printf '%s\n' "$@" | LC_ALL=C awk -v old="$CT_DATA/labels.tsv" '
+    BEGIN { while ((getline line < old) > 0) if (split(line, kv, "\t") == 2) n[kv[1]] = kv[2]; close(old)
+            for (i = 0; i < 16; i++) H[substr("0123456789abcdef", i + 1, 1)] = i }
+    NR % 2 == 1 { pkg = $0; next }
+    pkg ~ /^[A-Za-z][A-Za-z0-9_]*(\.[A-Za-z0-9_]+)+$/ && $0 ~ /^([0-9a-f][0-9a-f])+$/ && length($0) <= 120 {
+      s = ""; ok = 1
+      for (i = 1; i < length($0); i += 2) {
+        b = H[substr($0, i, 1)] * 16 + H[substr($0, i + 1, 1)]
+        if (b < 32 || b == 127) { ok = 0; break }
+        s = s sprintf("%c", b)
+      }
+      if (ok) n[pkg] = s
+    }
+    END { for (p in n) print p "\t" n[p] }' > "$CT_DATA/labels.tsv.tmp" && mv "$CT_DATA/labels.tsv.tmp" "$CT_DATA/labels.tsv"
+  printf '{"ok":1,"labels":%d}\n' "$(wc -l < "$CT_DATA/labels.tsv")"
+}
+
+case "$1" in now|summary|text|csv|detail|status|cooling|pkgs) ;; *)
   mkdir -p "$CT_RUN"
   lock_take "$CT_DATA/api.lock" || { echo '{"ok":0,"error":"Perintah lain sedang berjalan"}'; exit 0; }
   trap 'lock_drop "$CT_DATA/api.lock"' EXIT
@@ -181,10 +205,13 @@ case "$1" in
     fresh=$SS_ZONES
     release=$(kernel_release)
     thermal_health; running=$CS_RUNNING; cs_health=$(thermal_health_json)
+    skip=$(tr '\n' ',' 2>/dev/null < "$CT_RUN/stuck")   # sensors the sampler found stuck
     latest=$(ls "$CT_DATA"/data/*.tsv 2>/dev/null | tail -n 1)
     run_awk now 0 ${latest:-/dev/null}
     ;;
   summary) report json "$(secs_arg "$2")" ;;
+  pkgs) report pkgs 86400 ;;
+  labels) shift; learn_labels "$@" ;;
   text) report text "$(secs_arg "$2")" ;;
   csv) report csv "$(secs_arg "$2")" ;;
   detail) report detail "$(secs_arg "$2")" ;;
@@ -224,7 +251,7 @@ case "$1" in
     echo '{"ok":1}'
     ;;
   *)
-    echo "Pakai: report.sh now|summary SECS|text SECS|csv SECS|save SECS|status|set KEY VALUE|apply|start|stop|restart|reset|clear" >&2
+    echo "Pakai: report.sh now|summary SECS|text SECS|csv SECS|save SECS|status|pkgs|labels PKG HEX ...|set KEY VALUE|apply|start|stop|restart|reset|clear" >&2
     exit 1
     ;;
 esac
